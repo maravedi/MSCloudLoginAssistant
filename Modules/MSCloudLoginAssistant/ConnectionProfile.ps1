@@ -199,6 +199,14 @@ class Workload : ICloneable
                     $tenantGUIDValue = $Script:CloudEnvironmentInfo.token_endpoint.Split('/')[3]
                     $this.TenantGUID = $tenantGUIDValue
                 }
+                elseif ($null -ne $Script:CloudEnvironmentInfo -and $Script:CloudEnvironmentInfo.token_endpoint -like 'https://login.microsoftonline.us*')
+                {
+                    $this.EnvironmentName = 'AzureUSGovernment'
+                }
+                elseif ($null -ne $Script:CloudEnvironmentInfo -and $Script:CloudEnvironmentInfo.token_endpoint -like 'https://login.microsoftonline.de*')
+                {
+                    $this.EnvironmentName = 'O365GermanyCloud'
+                }
                 elseif ($Global:CustomEnvironment)
                 {
                     $this.EnvironmentName = 'Custom'
