@@ -834,6 +834,56 @@ function Get-MSCloudLoginAccessToken
     }
 }
 
+function Get-MSCloudLoginAuthorityHosts
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.String]
+        $TenantName
+    )
+
+    $normalizedTenant = $TenantName.ToLowerInvariant()
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    $addCandidate = {
+        param([string]$authority)
+        if (-not [string]::IsNullOrEmpty($authority) -and -not $candidates.Contains($authority))
+        {
+            $candidates.Add($authority)
+        }
+    }
+
+    if ($normalizedTenant -match '\.cn$')
+    {
+        & $addCandidate 'https://login.partner.microsoftonline.cn'
+    }
+
+    if ($normalizedTenant -match '\.de$')
+    {
+        & $addCandidate 'https://login.microsoftonline.de'
+    }
+
+    if ($normalizedTenant -match '\.us$' -or $normalizedTenant -match '\.gov$' -or $normalizedTenant -match '\.mil$')
+    {
+        & $addCandidate 'https://login.microsoftonline.us'
+    }
+
+    $fallbackAuthorities = @(
+        'https://login.microsoftonline.com',
+        'https://login.microsoftonline.us',
+        'https://login.partner.microsoftonline.cn',
+        'https://login.microsoftonline.de'
+    )
+
+    foreach ($authority in $fallbackAuthorities)
+    {
+        & $addCandidate $authority
+    }
+
+    return $candidates.ToArray()
+}
+
 function Get-CloudEnvironmentInfo
 {
     [CmdletBinding()]
@@ -867,34 +917,49 @@ function Get-CloudEnvironmentInfo
     $source = 'Get-CloudEnvironmentInfo'
     Add-MSCloudLoginAssistantEvent -Message 'Retrieving Environment Details' -Source $source
 
-    try
+    if ($null -ne $Credentials)
     {
-        if ($null -ne $Credentials)
-        {
-            $tenantName = $Credentials.UserName.Split('@')[1]
-        }
-        elseif (-not [string]::IsNullOrEmpty($TenantId))
-        {
-            $tenantName = $TenantId
-        }
-        elseif ($Identity.IsPresent)
-        {
-            return
-        }
-        else
-        {
-            throw 'TenantId or Credentials must be provided'
-        }
-        ## endpoint will work with TenantId or tenantName
-        $response = Invoke-WebRequest -Uri "https://login.microsoftonline.com/$tenantName/v2.0/.well-known/openid-configuration" -Method Get -UseBasicParsing
-
-        $content = $response.Content
-        $result = ConvertFrom-Json $content
-        return $result
+        $tenantName = $Credentials.UserName.Split('@')[1]
     }
-    catch
+    elseif (-not [string]::IsNullOrEmpty($TenantId))
     {
-        throw $_
+        $tenantName = $TenantId
+    }
+    elseif ($Identity.IsPresent)
+    {
+        return
+    }
+    else
+    {
+        throw 'TenantId or Credentials must be provided'
+    }
+
+    $authorityHosts = Get-MSCloudLoginAuthorityHosts -TenantName $tenantName
+    $lastError = $null
+
+    foreach ($authorityHost in $authorityHosts)
+    {
+        $wellKnownUri = "$authorityHost/$tenantName/v2.0/.well-known/openid-configuration"
+        Add-MSCloudLoginAssistantEvent -Message "Querying OpenID configuration at {$wellKnownUri}" -Source $source
+        try
+        {
+            $response = Invoke-WebRequest -Uri $wellKnownUri -Method Get -UseBasicParsing
+            if ($null -ne $response -and -not [string]::IsNullOrEmpty($response.Content))
+            {
+                $content = $response.Content
+                $result = ConvertFrom-Json $content
+                return $result
+            }
+        }
+        catch
+        {
+            $lastError = $_
+        }
+    }
+
+    if ($null -ne $lastError)
+    {
+        throw $lastError
     }
 }
 
@@ -1237,7 +1302,8 @@ function Get-AuthToken {
     }
 
     if ($DeviceCode) {
-        $deviceEndpoint = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/devicecode"
+        $authorityBase = $AuthorizationUrl.TrimEnd('/')
+        $deviceEndpoint = "$authorityBase/$TenantId/oauth2/v2.0/devicecode"
         $deviceBody = @{
             client_id = $ClientId
             scope = $Scope
@@ -1277,7 +1343,8 @@ function Get-AuthToken {
     $codeChallenge = [System.Convert]::ToBase64String($challengeBytes).TrimEnd('=')
     $codeChallenge = $codeChallenge.Replace('+', '-').Replace('/', '_')
     $redirectUri = "http://localhost:8400/"
-    $authorizeUrl = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/authorize?client_id=$ClientId&response_type=code&redirect_uri=$([System.Uri]::EscapeDataString($redirectUri))&response_mode=query&scope=$([System.Uri]::EscapeDataString($Scope))&code_challenge=$codeChallenge&code_challenge_method=S256"
+    $authorityAuthorizeBase = $AuthorizationUrl.TrimEnd('/')
+    $authorizeUrl = "$authorityAuthorizeBase/$TenantId/oauth2/v2.0/authorize?client_id=$ClientId&response_type=code&redirect_uri=$([System.Uri]::EscapeDataString($redirectUri))&response_mode=query&scope=$([System.Uri]::EscapeDataString($Scope))&code_challenge=$codeChallenge&code_challenge_method=S256"
 
     $listener = [System.Net.HttpListener]::new()
     $listener.Prefixes.Add($redirectUri)
